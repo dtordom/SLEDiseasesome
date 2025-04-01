@@ -1,0 +1,685 @@
+#' ·············································································
+#' Building Diseasome 
+#' R version 4.4.0 (2024-04-24 ucrt)
+#' Dec 2024
+#' ·············································································
+#' Dissect and merge pathway databases, and reduce overlapping
+
+## ·············································································
+## Set environment ---- 
+
+set.seed(12345)
+setwd("C:/Users/danie/Desktop/WORK/DISEASOME")
+
+load("C:/Users/danie/Desktop/WORK/DISEASOME/RData/DB_step11.RData")
+
+source("C:/Users/danie/Desktop/WORK/DISEASOME/Code/utils.R")
+
+check.packages(c("parallel","matrixStats","biomaRt","NOISeq","stringr","dplyr","tidyr",
+                 "doParallel","caret","pbapply","BiocParallel","tibble","pathMED",
+                 "NbClust","ConsensusClusterPlus","SNFtool","BloodGen3Module","purrr",
+                 "igraph","pheatmap","umap","factoextra","Seurat","iClusterPlus","M3C",
+                 "cluster","foreach","doSNOW","tm","wordcloud","RColorBrewer","SnowballC"))
+
+## ······································································ Step 7
+## Clustering pathways ---- 
+
+## Merge all cohorts
+msAll<-do.call("rbind",lapply(SCORES$mscores,function(dat){
+  dat<-as.matrix(t(dat[names(DRGs.DB),]))
+  return(dat)}))
+
+## Cluster Round 1
+## ConsensusClustering 
+d = sweep(msAll,1, apply(msAll,1,median,na.rm=T))
+consensus.res = ConsensusClusterPlus(as.matrix(d),maxK=50,reps=500,pItem=0.8,
+                                     pFeature=1,clusterAlg="km",distance="euclidean",
+                                     title = paste0(getwd(),"/ccp"),verbose = TRUE,
+                                     innerLinkage = "complete",seed=12345,plot=NULL)
+
+save.image("C:/Users/danie/Desktop/WORK/DISEASOME/DB_step12.RData")
+gc()
+
+
+## Get Optimal K (M3C)
+m3K<-M3C(mydata=msAll, cores = 16, iters = 100, maxK = 40, pItem = 0.8,
+   des = NULL, ref_method = c("reverse-pca", "chol"), repsref = 100,
+   repsreal = 100, clusteralg = "km",#c("pam", "km", "spectral", "hc"),
+   pacx1 = 0.1, pacx2 = 0.9, seed = 123, objective = "entropy",
+   removeplots = FALSE, silent = FALSE, fsize = 6, method = 1,
+   lambdadefault = 0.1, tunelambda = TRUE, lseq = seq(0.02, 0.1, by = 0.02),
+   lthick = 0.8, dotsize = 1)
+
+## Get Optimal number of clusters based on NbClust (method: complete, kmeans)
+algs<-c("ch","hartigan","cindex","db","silhouette","ratkowsky","ball",
+        "ptbiserial","dunn","gplus","tau","sdindex","kl","gamma",
+        "sdbw","frey","mcclain","gap","dindex")
+
+stab.table<-list()
+# stab.table<-readRDS("D:/Work/DISEASOME/RData/stabRnd1.rds")
+
+for(alg in algs){
+  print(alg)
+  Nb<-NbClust(data = t(msAll), diss = NULL, distance = "euclidean", min.nc = 2,
+              max.nc = 50, method = "complete",index = alg, alphaBeale = 0.1)
+  Nb<-data.frame("Allindex"=Nb$All.index,"Kclusters"=as.numeric(names(Nb$All.index)))
+  
+  stab.table[[alg]]<-find_best_clusters(nbclust_results = Nb,metric = alg)
+  saveRDS(stab.table,"D:/Work/DISEASOME/RData/stabRnd1.rds")
+  
+  x<-table(unlist(stab.table))
+  print(x[order(x,decreasing=TRUE)])
+  gc()
+}
+
+
+cp<-data.frame("ID"=names(consensus.res[[2]]$consensusClass),
+               do.call("cbind",lapply(2:length(consensus.res),function(i){
+                 
+                 return(consensus.res[[i]]$consensusClass)
+               })))
+colnames(cp)<-c("ID",paste0("K",2:50))
+
+## K Candidates: 25, 32
+gc()
+# C:/Users/danie/Desktop/WORK/Update_MyPROSLE/RData/
+save.image("C:/Users/danie/Desktop/WORK/DISEASOME/RData/CCPaths.RData")
+saveRDS(cp,"C:/Users/danie/Desktop/WORK/DISEASOME/RData/cp.rds")
+# save.image("C:/Users/danie/Desktop/WORK/DISEASOME/DB_step12.RData")
+
+
+##················································
+#### Explore Cluster annotation #### 
+
+library(ggplot2)
+library(ggalluvial)
+library(dplyr)
+library(tidyr)
+
+df_data<-cp[,c("ID","K25","K32")]#,"K27","K28","K32","K33","K34")]
+
+colores <- colorRampPalette(brewer.pal(12, "Set3"))(length(unique(df_data[,ncol(df_data)])))  # Extender paleta
+
+df_long <- df_data %>%
+  pivot_longer(cols = -ID, names_to = "K", values_to = "Cluster") 
+
+ggplot(df_long, aes(x = K, stratum = Cluster, alluvium = ID, fill = as.factor(Cluster))) +
+  geom_flow(color = "black", size = 0.2) +  
+  geom_stratum(alpha = 0.5, color = "black") +  
+  geom_text(stat = "stratum", aes(label = Cluster), size = 3, color = "black") +  # ⬅️ Añadir etiquetas
+  scale_fill_manual(values = colores) +  
+  theme_minimal() +
+  labs(title = "Sankey Plot de Clusters", x = "K", fill = "Cluster") +
+  theme(legend.position = "none")
+
+ann.db[ann.db$TraitID %in% cp[cp$K25 == 24,"ID"],"term"]
+ann.db[ann.db$TraitID %in% cp[cp$K32 == 21,"ID"],"term"]
+
+
+
+##················································
+#### Second round of Clustering #### 
+
+library("M3C")
+library("NbClust")
+
+load("C:/Users/danie/Desktop/WORK/DISEASOME/RData/CCPaths.RData")
+
+rm(list=setdiff(ls(),c("msAll","cp")))
+source("D:/Work/DISEASOME/Code/utils.R")
+gc()
+
+algs<-c("ch","hartigan","cindex","db","silhouette","ratkowsky","ball",
+        "ptbiserial","dunn","gamma","gplus","tau","sdindex","kl",
+        "sdbw","frey","hubert","mcclain","gap","dindex")
+
+set.seed(1234)
+
+# K selected = 32
+OptimalK<-list()
+# OptimalK<-readRDS("C:/Users/danie/Desktop/WORK/DISEASOME/RData/stabRnd2.rds")
+
+for(i in 1:32){
+  print(i)
+  tmp<-msAll[,cp[cp$K32==i,"ID"]]
+  
+  maxClusters<-ifelse(trunc(ncol(tmp)*0.2)<3,3,trunc(ncol(tmp)*0.2))
+  if(maxClusters>20){maxClusters<-20}
+  print(maxClusters)
+  
+  ## Get Optimal K (M3C)
+  m3K<-M3C(mydata=tmp, cores = 12, iters = 1000, maxK = maxClusters, pItem = 0.8,
+           des = NULL, ref_method = c("reverse-pca", "chol"), repsref = 100,
+           repsreal = 100, clusteralg = "km",#c("pam", "km", "spectral", "hc"),
+           pacx1 = 0.1, pacx2 = 0.9, seed = 123, objective = "entropy",
+           removeplots = FALSE, silent = FALSE, fsize = 6, method = 1,
+           lambdadefault = 0.1, tunelambda = TRUE, lseq = seq(0.02, 0.1, by = 0.02),
+           lthick = 0.8, dotsize = 1)
+  gc()
+  m3K$plots[[3]]
+  
+  stab.table<-list()
+  for(alg in algs){
+    print(alg)
+    Nb<-NbClust(data = t(tmp), diss = NULL, distance = "euclidean", min.nc = 2,
+                max.nc = maxClusters, method = "complete",index = alg, alphaBeale = 0.1)
+    Nb<-data.frame("Allindex"=Nb$All.index,"Kclusters"=as.numeric(names(Nb$All.index)))
+    
+    stab.table[[alg]]<-find_best_clusters(nbclust_results = Nb,metric = alg)
+    x<-table(unlist(stab.table))
+    print(x[order(x,decreasing=TRUE)])
+    gc()
+  }
+  res<-list("m3c"=m3K$plots,"Nb"=stab.table)
+  
+  OptimalK[[i]]<-res
+  saveRDS(OptimalK,"C:/Users/danie/Desktop/WORK/DISEASOME/RData/stabRnd2.rds")
+}
+names(OptimalK) <- paste0("cl",1:32)
+
+
+# save.image("C:/Users/danie/Desktop/WORK/DISEASOME/RData/ClustersR2.RData")
+rm(DATA,m3K,Nb,res,SCORES,stab.table,tmp,alg,algs,i,maxClusters,x)
+gc()
+save.image("C:/Users/danie/Desktop/WORK/DISEASOME/RData/ClustersRound2.RData")
+
+
+## Get Consensus Clusters for each Round1 Cluster
+# load("D:/Work/DISEASOME/RData/ClustersRound2.RData")
+cp.round1<-cp
+
+
+cp2.round2<-list()
+for(i in 1:32){
+  print(i)
+  tmp<-msAll[,cp.round1[cp.round1$K32==i,"ID"]]
+  
+  d = sweep(tmp,1, apply(tmp,1,median,na.rm=T))
+  consensus.res = ConsensusClusterPlus(as.matrix(d),maxK=20,reps=50,pItem=0.8,
+                                       pFeature=1,clusterAlg="km",distance="euclidean",
+                                       title = paste0(getwd(),"/ccp"),verbose = TRUE,
+                                       innerLinkage = "complete",seed=12345,plot=NULL)
+  
+  cp<-data.frame("ID"=names(consensus.res[[2]]$consensusClass),
+                 do.call("cbind",lapply(2:length(consensus.res),function(i){
+                   
+                   return(consensus.res[[i]]$consensusClass)
+                 })))
+  colnames(cp)<-c("ID",paste0("K",2:20))
+  
+  cp2.round2[[i]]<-cp
+  gc()
+}
+colnames(cp2.round2)<-paste0("R1.",1:32)
+
+save.image("C:/Users/danie/Desktop/WORK/DISEASOME/RData/Step13.RData")
+
+
+## ······································································ Step 8
+## Clustering Annotation ---- 
+
+source("C:/Users/danie/Desktop/WORK/DISEASOME/Code/utils.R")
+
+check.packages(c("parallel","matrixStats","biomaRt","NOISeq","stringr","dplyr","tidyr",
+                 "doParallel","caret","pbapply","BiocParallel","tibble","pathMED",
+                 "NbClust","ConsensusClusterPlus","SNFtool","BloodGen3Module","purrr",
+                 "igraph","pheatmap","umap","factoextra","Seurat","iClusterPlus",
+                 "cluster","foreach","doSNOW","tm","wordcloud","RColorBrewer","SnowballC"))
+
+load("C:/Users/danie/Desktop/WORK/DISEASOME/RData/Step13.RData")
+
+rm(maxCl,i,d,cp,consensus.res); gc()
+
+rownames(ann.db)<-ann.db$TraitID
+
+
+## Explore Options Manually
+r1.i<-27 ## MANUAL <--------------
+
+## Define Values 
+OptimalK[[r1.i]]$m3c[[3]]
+k<-table(unlist(OptimalK[[r1.i]]$Nb))
+k<-k[order(k,decreasing = T)]
+table(cp.round1$K32==r1.i)
+print(k)
+
+values<-c(6,7,8,12,18) ## MANUAL <--------------
+
+## Get plots and decide final k for round 2
+values<-paste0("K",values)
+cp<-data.frame("ID"=rownames(cp.round2[[r1.i]]),
+               cp.round2[[r1.i]][,values])
+dPlot<-getSankey(cp)
+
+dot.list<-lapply(values,function(k){
+  paths<-cp[,c("ID",k)]
+  colnames(paths)<-c("ID","K")
+  paths$Function<-ann.db[paths$ID,"term"]
+  
+  pl.dot<-ClusterDot(paths = paths,useTM = FALSE)
+  print(table(cp.round2[[r1.i]][k]))
+  return(pl.dot)  
+  
+})
+term.list<-lapply(values,function(k){
+  paths<-cp[,c("ID",k)]
+  colnames(paths)<-c("ID","K")
+  res<-explorePaths(paths,ann.db)
+  return(res)
+})
+names(term.list)<-values
+
+
+##.....
+dev.off()
+dot.list
+plot(dPlot)
+
+for(i in 1:length(term.list)){
+  tmp<-term.list[[i]]
+  cat("______ K: ",names(term.list)[i],"________________________________________________________\n")
+  
+  for(j in 1:length(tmp)){
+    cat(paste0("\nCluster ",j,"\n"))
+    print(tmp[[j]]$termList)
+    cat("································#\n")
+    cat("\n")
+  }
+}
+
+
+## Round2 K selection
+round2<-paste0("K",c(4,8,9,6,6,3,7,11,8,14,8,8,12,4,13,12,5,6,3,8,3,3,9,10,10,8,12,7,5,8,5,1))
+
+SLED.clusters<-do.call("rbind",lapply(1:length(round2),function(r.i){
+  tmp<-cp.round2[[r.i]]
+  if(round2[r.i]!="K1"){
+    tmp<-data.frame("ID"=tmp$ID,"Round1"=r.i,"Round2"=tmp[,round2[r.i]])
+  }else{
+    tmp<-data.frame("ID"=tmp$ID,"Round1"=r.i,"Round2"=1)
+  }
+  return(tmp)
+}))
+
+for(i in 1:32){
+  print(length(unique(SLED.clusters[SLED.clusters$Round1==i,"Round2"])))
+}
+
+
+save.image("C:/Users/danie/Desktop/WORK/DISEASOME/RData/Step14.RData")
+
+
+## ·············································································
+## Save R Object (SLE Diseasome)
+
+library("dplyr")
+
+load("C:/Users/danie/Desktop/WORK/DISEASOME/RData/Step14.RData")
+
+## Geneset.db (full.DB)
+Geneset.db<-full.DB
+
+## DRGs.db (DRGs.DB)
+DRGs.db<-DRGs.DB
+
+
+## Geneset.info (ann.db) ##
+#' GenesetID (TraitID)
+#' AnnotationID
+#' Source
+#' Term
+#' Coannotation
+
+Geneset.info<-ann.db
+colnames(Geneset.info)<-c("GenesetID","AnnotationID","Term","Source","Coannotation")
+
+rm(list=setdiff(ls(),c("Geneset.db","Geneset.info","DRGs.db","SLED.clusters")))
+gc()
+
+
+## DRGs.info (SLED.clusters while waiting for final annotation)
+#' GenesetID
+#' Term
+#' Round1
+#' Round2
+#' Cluster
+#' Term.round1
+#' Term.round2
+
+colnames(SLED.clusters)[1]<-"GenesetID"
+
+SLED.clusters$Term<-Geneset.info[SLED.clusters$GenesetID,"Term"]
+SLED.clusters$Cluster<-paste0("SLED",SLED.clusters$Round1,".",SLED.clusters$Round2)
+
+SLED.clusters<-SLED.clusters[,c("GenesetID","Term","Round1","Round2","Cluster")]
+
+
+## Annotation of Round1
+SLED.clusters <- SLED.clusters %>%
+  mutate(Term.round1 = case_when(
+    Round1 == 1 ~ "Neutrophils",
+    Round1 == 2 ~ "Innate immune response, inflammation, IL1 and IL6 signaling",
+    Round1 == 3 ~ "CD4 T cell differentiation and activation",
+    Round1 == 4 ~ "Neutrophils, monotyes, activated DCs, phagocytosis",
+    Round1 == 5 ~ "Cell cycle, cell division in stimulated CD4 T cells, plasma cells",
+    Round1 == 6 ~ "Monocytes, low-density lipoprotein particle invovled activity",
+    Round1 == 7 ~ "Plasma cells, B cells, immunoglobulin production, DNA replication and repair, cell cycle",
+    Round1 == 8 ~ "Transcription, translation, IFN-II and -III",
+    Round1 == 9 ~ "Phagocytosis, antigen processing and presentation",
+    Round1 == 10 ~ "APCs, MHC-II",
+    Round1 == 11 ~ "Cytotoxic T and NK cells",
+    Round1 == 12 ~ "Oxidative phosphorylation, mitochondrial respiration and proteolysis",
+    Round1 == 13 ~ "TLR and IL signaling, inflammation, myeloid cell activation, IFN-II",
+    Round1 == 14 ~ "IFN-I induction and response, activated DCs",
+    Round1 == 15 ~ "Macrophages, IFN-I, antigen processing and presentation via MHC-I",
+    Round1 == 16 ~ "TLR signaling, autophagy, exocytosis, macromolecule metabolism",
+    Round1 == 17 ~ "Inflammation, complement activation",
+    Round1 == 18 ~ "Erythrocytes and platelets",
+    Round1 == 19 ~ "B cells, MHC-II",
+    Round1 == 20 ~ "Inflammation, cytokine and chemokine response, T cells",
+    Round1 == 21 ~ "BCR signaling, inflammation, mRNA processing, protein localization",
+    Round1 == 22 ~ "IFN induction and response",
+    Round1 == 23 ~ "CD4 T cells and signal transduction",
+    Round1 == 24 ~ "Response to DNA damage, apoptosis and T cell exhaustion",
+    Round1 == 25 ~ "Protein synthesis, modification and localization",
+    Round1 == 26 ~ "Mitochondrial transcription, translation, macromolecule biosynthesis and metabolism",
+    Round1 == 27 ~ "Transcription, protein synthesis and modification, CD4 T cells",
+    Round1 == 28 ~ "Oxidative stress and unfolded protein response",
+    Round1 == 29 ~ "Protein synthesis and metabolism",
+    Round1 == 30 ~ "Transcription",
+    Round1 == 31 ~ "Cellular transport, stress response, cell proliferation and differentiation",
+    Round1 == 32 ~ "Cell growth, response to hormone, SUMOylation",
+    TRUE ~ "Other"
+  ))
+
+
+## Annotation of Round2
+SLED.clusters <- SLED.clusters %>%
+  mutate(Term.round2 = case_when(
+    Cluster == "SLED1.1" ~ "Neutrophils, azurophils, basophils, eosinophils",
+    Cluster == "SLED1.2" ~ "Neutrophil extracellular traps, phagocytic vesicles",
+    Cluster == "SLED1.3" ~ "Extracellular matrix",
+    Cluster == "SLED1.4" ~ "Immune response and regulation",
+    
+    Cluster == "SLED2.1" ~ "Fatty acid metabolis, IL17",
+    Cluster == "SLED2.2" ~ "AP-1 transcription factors",
+    Cluster == "SLED2.3" ~ "Inflammation, IL1, TLR8-BAFF network, fructose 2,6-bisphosphate metabolism",
+    Cluster == "SLED2.4" ~ "Inflammation, IL1, IL4, IL6, MAPK and NF-kB signaling",
+    Cluster == "SLED2.5" ~ "Inflammation, neutrophils, monotypes, resting DCs, IL1, IL4, IL13, NF-kB signaling",
+    Cluster == "SLED2.6" ~ "Inflammation, cytokine and chemokine activity, GPCR signaling, synaptic transmission",
+    Cluster == "SLED2.7" ~ "Neutrophils, monocytes, DCs, eosinophils, TLR4, TNF",
+    Cluster == "SLED2.8" ~ "IL18, NK cells",
+    
+    Cluster == "SLED3.1" ~ "Thymic T cell proliferation and differentiation, CD4 Tem, IL2, IL4",
+    Cluster == "SLED3.2" ~ "CD4 naïve T cells and Tcm, T cell activation, NK cells, IL2, IL7, TCR, IL17",
+    Cluster == "SLED3.3" ~ "T cell differentiation and activation, TCR, mTOR, NF-kB, Wnt, Hippo, CD28 dependent PI3K/Akt signaling",
+    Cluster == "SLED3.4" ~ "CD4 Tcm, PI3K/AKT signaling",
+    Cluster == "SLED3.5" ~ "T cell differentiation and activation, CD8 Tcm, Tregs, positive regulation of IFN gamma production",
+    Cluster == "SLED3.6" ~ "Th2 cell differentiation, CD4 Tem, CD8 T cells",
+    Cluster == "SLED3.7" ~ "GPCR signaling, chemotaxis, B cells",
+    Cluster == "SLED3.8" ~ "T cells, IL12, response to IL4, Wnt signaling",
+    Cluster == "SLED3.9" ~ "CD56 bright NK cells, T cell differentiation, TCR",
+    
+    Cluster == "SLED4.1" ~ "Neutrophils, monocytes, phagocytosis, IL10, IL12, BDNF-TrkB, VEFG",
+    Cluster == "SLED4.2" ~ "Neutrophils, monotypes, activated DCs, inflammation, GPCR activity, TLR, regulation of IKK/NFkB and ERK1/ERK2 signaling",
+    Cluster == "SLED4.3" ~ "Macrophage activation, cDC, phagocytosis, Th17 cell differentiation, response to TNF, TLR, JAK-STAT, MAPK ",
+    Cluster == "SLED4.4" ~ "NKT cells, IL1b production, CD40 signaling, PI3K signaling",
+    Cluster == "SLED4.5" ~ "Mast cell degranulation, complement and coagulation cascades, MAP2K/MAPK and PI3K activation",
+    Cluster == "SLED4.6" ~ "IGF1R signaling",
+    
+    Cluster == "SLED5.1" ~ "Cell cycle, pro-B cells, plasma cells, erythrocytes",
+    Cluster == "SLED5.2" ~ "Cell cycle, plasma cells, complement,cell division in stimulated CD4 T cells",
+    Cluster == "SLED5.3" ~ "Cell cycle, cell division in stimulated CD4 T cells, Tgd cells, plasma cells, MHC-II signaling",
+    Cluster == "SLED5.4" ~ "Cell cycle, cell division in stimulated CD4 T cells, plasma cells",
+    Cluster == "SLED5.5" ~ "DNA replication and repair, cell division in stimulated CD4 T cells, plasma cells",
+    Cluster == "SLED5.6" ~ "Cell cycle, cell division in stimulated CD4 T cells, plasma cells, somatic hypermutation",
+    
+    Cluster == "SLED6.1" ~ "Monocytes, chemokine production",
+    Cluster == "SLED6.2" ~ "Monocytes, DCs, low-density lipoprotein particle invovled activity",
+    Cluster == "SLED6.3" ~ "DN3 B cells, neutrophil activation, glycosaminoglycan metabolism",
+    
+    Cluster == "SLED7.1" ~ "Cell cycle, DNA replication and repair, Th2 cells",
+    Cluster == "SLED7.2" ~ "DNA replication and repair",
+    Cluster == "SLED7.3" ~ "B cells, DN1 B cells, memory B cells, plasma cells",
+    Cluster == "SLED7.4" ~ "Plasma cells, immunoglobulin production, BCR, adaptive immune response",
+    Cluster == "SLED7.5" ~ "ER lumen, protein-disulfide reductase activity",
+    Cluster == "SLED7.6" ~ "IFN-I, Plasma cells, nucleotide metabolism",
+    Cluster == "SLED7.7" ~ "DNA replication and repair, regulation of cell cycle",
+    
+    Cluster == "SLED8.1" ~ "Transcription, spliceosome, fatty acid metabolism",
+    Cluster == "SLED8.2" ~ "Transcription, fructose, mannose, and branched-chain amino acid metabolism, CORO1A-DEF6 network",
+    Cluster == "SLED8.3" ~ "IFN-II and -III, transcription elongation, oxidative phophorylation, translation, steroid metabolism",
+    Cluster == "SLED8.4" ~ "IFN-II and -III, transcription, translation, response to reactive oxygen species, purine and nucleotide metabolism",
+    Cluster == "SLED8.5" ~ "Transcription, translation, protein modification, response to IL7, glutahione, glucose, and purine metabolism",
+    Cluster == "SLED8.6" ~ "mRNA processing, mitotic spindle organization",
+    Cluster == "SLED8.7" ~ "Transcription initiation and elongation, mRNA splicing and modification, telomere maintenance",
+    Cluster == "SLED8.8" ~ "rRNA processing",
+    Cluster == "SLED8.9" ~ "Cap-dependent translational initiation, oxidations, non-carbon metabolism",
+    Cluster == "SLED8.10" ~ "Cellular amino acid biosynthetic process, cysteine, methionine and tyrosine metabolism",
+    Cluster == "SLED8.11" ~ "Peroxisome",
+    
+    Cluster == "SLED9.1" ~ "Autophagy, lysosome related activity, response to lipoproteins, macrophages",
+    Cluster == "SLED9.2" ~ "IL8 production, phagocytosis, , regulation of ERK1 and ERK2 cascade, NLRP1 inflammasome complex",
+    Cluster == "SLED9.3" ~ "Inflammation, IL6, monocytes, TCR, BCR, phagocytosis, C3b binding, FcR mediated inhibotory signaling",
+    Cluster == "SLED9.4" ~ "DC differentiation, B cells, neutrophils, macroautophagy, cytosolic DNA sensing",
+    Cluster == "SLED9.5" ~ "Antigen processing and presentation, MHC-I, TLR2",
+    Cluster == "SLED9.6" ~ "Nucleosome assembly, cellular oxidant detoxification, CLP, stem cell population maintenance",
+    Cluster == "SLED9.7" ~ "RNA polymerase II transcription initiation",
+    Cluster == "SLED9.8" ~ "BCR downstream signaling, activation of NF-kB in B cells, non-canonical NF-kB siganling, DNA replication pre-initiation",
+    
+    Cluster == "SLED10.1" ~ "NK, DC and macrophage activation,regulation of TCR signaling and antigen presentation",
+    Cluster == "SLED10.2" ~ "Antigen processing and presentation, MHC-II, IFN gamma production, T-helper cell differentiation, B cell surface signature",
+    Cluster == "SLED10.3" ~ "MHC-II antigen presentation, memory B cells, B cell proliferation, T cell activation, complement system",
+    Cluster == "SLED10.4" ~ "Monocytes, macrophage differentiation, cytokines",
+    Cluster == "SLED10.5" ~ "Transcription, IFN-II, alpha-beta T cell differentiation, neutrophil chemotaxis",
+    Cluster == "SLED10.6" ~ "CD4 Tcm, RNA processing and catabolic process",
+    Cluster == "SLED10.7" ~ "mRNA transport",
+    Cluster == "SLED10.8" ~ "Cellular response to oxidative stress, senescence",
+    Cluster == "SLED10.9" ~ "Translation initiation",
+    Cluster == "SLED10.10" ~ "Translation initiation and elongation",
+    Cluster == "SLED10.11" ~ "Transcription, translation, CLP, IL12 signaling",
+    Cluster == "SLED10.12" ~ "Protein folding, IL12 signaling, monocytes",
+    Cluster == "SLED10.13" ~ "Transcription",
+    Cluster == "SLED10.14" ~ "Tat-mediated HIV elongation",
+    
+    Cluster == "SLED11.1" ~ "CD8 Tcm, cytotoxic T cells, NK cells, Tgd cells, basophils, allograpft rejection",
+    Cluster == "SLED11.2" ~ "CD8 T cells, NK cell mediated cytotoxicity",
+    Cluster == "SLED11.3" ~ "NK cells, immunological synapse formation",
+    Cluster == "SLED11.4" ~ "T cells, GPCR activity",
+    Cluster == "SLED11.5" ~ "Cytotoxic NK cells",
+    Cluster == "SLED11.6" ~ "Cytotoxic T cells, NK cells, mast cell degranulation",
+    Cluster == "SLED11.7" ~ "Monocyte chemotaxis",
+    Cluster == "SLED11.8" ~ "Cytokine and chemokine activity",
+    
+    Cluster == "SLED12.1" ~ "DNA replication and repair",
+    Cluster == "SLED12.2" ~ "Mitochondial Translation, IFN-II",
+    Cluster == "SLED12.3" ~ "Proteolysis, cell cycle checkpoint",
+    Cluster == "SLED12.4" ~ "Oxidative phosphorylation, mitochondrial respiratory chain complex I and IV",
+    Cluster == "SLED12.5" ~ "Mitochondrial mRNA catabolic process",
+    Cluster == "SLED12.6" ~ "Oxidative phosphorylation, protein degradation",
+    Cluster == "SLED12.7" ~ "Oxidative phosphorylation, mitochondrial respiratory chain complex III",
+    Cluster == "SLED12.8" ~ "Negative regulation of stress response",
+    
+    Cluster == "SLED13.1" ~ "Inflammation, CD4 Tem, monocytes, chemotaxis, FCGR signaling, inflammasome complex assembly, TLR4 ",
+    Cluster == "SLED13.2" ~ "Chemokines and inflammatory molecules in myeloid cells, macrophage activation",
+    Cluster == "SLED13.3" ~ "Activated DCs, TLR4, TLR6, IL6, Il10, IL20 signaling",
+    Cluster == "SLED13.4" ~ "CD8 Tem, B cells, programmed cell death, apoptosis, autophagy",
+    Cluster == "SLED13.5" ~ "Inflammation, TLR2 and TLR3 cascade, IFN gamma production, programmed cell death",
+    Cluster == "SLED13.6" ~ "TLR4 signaling, GPCR activity",
+    Cluster == "SLED13.7" ~ "IFN, TLR4 and IL18 signaling, phagosome",
+    Cluster == "SLED13.8" ~ "Apoptosis, autophagy, IL17 signaling, TLR4 cascade, IRF7 activation in TRL7/8 or 9 signaling",
+    Cluster == "SLED13.9" ~ "Regulation of IL8 and TNF production, MAPK and JNK cascade, response to TNF, NIK/NF-kB signaling ",
+    Cluster == "SLED13.10" ~ "TLR, TNF, IL17, IL37, AP-1, EGF/EGFR and IL1 signaling, IL12 production, IFN gamma response",
+    Cluster == "SLED13.11" ~ "Cytokine production, GPCR and NIK/NF-kB signaling, meiosis",
+    Cluster == "SLED13.12" ~ "Calcium ion homeostasis, fatty acid biosynthesis",
+    
+    Cluster == "SLED14.1" ~ "IFN-I induction and response, activated DCs, innate activation",
+    Cluster == "SLED14.2" ~ "IFN-I response, IL27 and MDA5 signaling, activated DCs",
+    Cluster == "SLED14.3" ~ "IFN-II signaling, innate immune sensing",
+    Cluster == "SLED14.4" ~ "IFN-I, IFN-I/II/III",
+    
+    Cluster == "SLED15.1" ~ "AP-1 transcription factor network, TLR signaling, ERK1 and ERK2 cascade",
+    Cluster == "SLED15.2" ~ "Antigen processing and presentation via MHC-I, cell activation (IL15, IL23, TNF), response to IL1, IRF3 mediated induction of IFN-I, TNFR2 non-canonical NF-kB signaling",
+    Cluster == "SLED15.3" ~ "Synaptic vesicle and membrane",
+    Cluster == "SLED15.4" ~ "Pro-inflammatory DCs, IL4, IL13, IL1 signaling, myeloid cell response",
+    Cluster == "SLED15.5" ~ "M1 macrophages, IFN-II, RIG-I signaling, transcription, DNA damage response, apoptosis",
+    Cluster == "SLED15.6" ~ "Macrophages, IRF activation, IRF3 mediated activation of IFN-I, RIG-I signaling, IL27, ISG15,NLR signaling",
+    Cluster == "SLED15.7" ~ "Protein autophosphorylation, ubiquitination and deubiquitination, cell cycle regulation",
+    Cluster == "SLED15.8" ~ "G1/S transition, regulation of apoptosis",
+    Cluster == "SLED15.9" ~ "Mitotic chromosome movements and recombination, pyrimidine metabolism",
+    Cluster == "SLED15.10" ~ "Innate immune system",
+    Cluster == "SLED15.11" ~ "Ion homeostasis",
+    Cluster == "SLED15.12" ~ "DCs, autophagy, TNF production, response to exogenous dsRNA",
+    Cluster == "SLED15.13" ~ "T cell costimulation",
+    
+    Cluster == "SLED16.1" ~ "Sphingolipid metabolism",
+    Cluster == "SLED16.2" ~ "Protein synthesis, modification and transport, IKK/NF-kB signaling, NK cells mediated cytotoxicity",
+    Cluster == "SLED16.3" ~ "Macroautophagy, TLR4 signaling, exocytosis, regulation of endocytosis",
+    Cluster == "SLED16.4" ~ "Autophagy, protein modification, TLR7 signaling",
+    Cluster == "SLED16.5" ~ "Wax and plasmalogen biosynthesis, glycosphingolipid metabolism",
+    Cluster == "SLED16.6" ~ "Regulation of transcription",
+    Cluster == "SLED16.7" ~ "Macromolecule metabolism and secretion, cytoskeleton organization, neutrophil mediated immunity, negative regulation of activated T cell proliferation",
+    Cluster == "SLED16.8" ~ "Protein and fatty acid biosynthesis, modulation of chemical synaptic transmission",
+    Cluster == "SLED16.9" ~ "Phophatidylinositol and unsaturated fatty acid biosynthesis, protein processing, positive regulation of macrophage cytokine production",
+    Cluster == "SLED16.10" ~ "Regulation of signaling receptor activity",
+    Cluster == "SLED16.11" ~ "TLR9 signaling, regulation of exocytosis",
+    Cluster == "SLED16.12" ~ "Protein ubiquitination, DNA repair",
+    
+    Cluster == "SLED17.1" ~ "Inflammation, resting DCs, IFN, cell activation (IL15, IL23, TNF), regulation of IL1 production and NIF/NF-kB signaling, monocyte chemotaxis",
+    Cluster == "SLED17.2" ~ "Inflammation, complement activation, myeloid DC differentiation, leukocyte migration, cellular response to exogenous dsRNA",
+    Cluster == "SLED17.3" ~ "Complement activation (C4 and C2), B cells, basophils, apoptotic cell clearance",
+    Cluster == "SLED17.4" ~ "IFN-I response, DNA replication, post-transcriptional gene silencing by RNA",
+    Cluster == "SLED17.5" ~ "Complement activation, integrin cell surface interactions, negative regulation of phosphorylation",
+    
+    Cluster == "SLED18.1" ~ "Erythrocytes and activity",
+    Cluster == "SLED18.2" ~ "Erythrocyte differentiation and activity",
+    Cluster == "SLED18.3" ~ "Erythrocytes, hematopoietic stem cell differentiation, IL18 signaling, phosphatidylinositol signaling",
+    Cluster == "SLED18.4" ~ "Platelets, prostanoids, chemotaxis, integrin-mediated signaling",
+    Cluster == "SLED18.5" ~ "Erythrocytes, positive regulation of macroautophagy, negative regulation of extrinsic apoptotic signaling",
+    Cluster == "SLED18.6" ~ "Erythrocyte take up oxygen and release carbon dioxide",
+    
+    Cluster == "SLED19.1" ~ "B cell surface signature, B cell proliferation and differentiation, naïve B cell surface signature",
+    Cluster == "SLED19.2" ~ "Naïve B cell surface signature, BCR signaling, MHC-II, humoral immune response",
+    Cluster == "SLED19.3" ~ "B cell surface signature, pDC",
+    
+    Cluster == "SLED20.1" ~ "Inflammasome receptors and signaling, IFN-I production, activated T cell proliferation, cytokine response, negative regulation of NIK/NF-kB signaling and macrophage apoptotic process",
+    Cluster == "SLED20.2" ~ "TLR7 and TLR9 signaling, chemokine production, Ras protein signaling",
+    Cluster == "SLED20.3" ~ "T cells, B1 cell homeostasis, IKK/NF-kB signaling, proinflammatory DCs, mitochondrion",
+    Cluster == "SLED20.4" ~ "CD4 T cell activation, plasma cell surface signature, isotype switching, IL12 and IL18 signaling",
+    Cluster == "SLED20.5" ~ "Regulation of signal transduction, regulation of lysosome organization",
+    Cluster == "SLED20.6" ~ "T cell, neutrophil and eosinophil chemotaxis, response to IL1 and LPS, CCR2 and CXCR3 chemokine receptor binding",
+    Cluster == "SLED20.7" ~ "M2 macrophages, VEGFA-VEGFR2 signaling",
+    Cluster == "SLED20.8" ~ "Antigen processing and presentation of exogenous antigen, NOTCH4 signaling",
+    
+    Cluster == "SLED21.1" ~ "BCR signaling, antigen presentation, NKT cell differentiation, ARF and Rho signaling",
+    Cluster == "SLED21.2" ~ "mRNA processing, PKC activity, protein localization",
+    Cluster == "SLED21.3" ~ "Inflammation, cytokines/chemokines, protein targeting to lysosome, miRNA metabolic process",
+    
+    Cluster == "SLED22.1" ~ "Innate immune activation, IFN response, NF-kB activation, IL1 structural pathway, TNF receptor binding",
+    Cluster == "SLED22.2" ~ "IFN-I and IFN-I/II/III, innate immune activation, myeloid cell differentiation, T cell and erythrocyte proliferation, DC surface signature, TLR and IL10 signaling",
+    Cluster == "SLED22.3" ~ "Monocytes, complement, LPS response, GPCR and IL10 signaling, proinflammatory and profibrotic mediators",
+    
+    Cluster == "SLED23.1" ~ "CD4 naïve T cells, transmembrane transport, signaling transduction",
+    Cluster == "SLED23.2" ~ "CD4 T cells, resting DC surface signature, signal transduction",
+    Cluster == "SLED23.3" ~ "T cells, TCR V(D)J recombination, Wnt signaling",
+    Cluster == "SLED23.4" ~ "T cells, transcription, signaling transduction, senescence and autophagy, endosome",
+    Cluster == "SLED23.5" ~ "Inflammation, IL4, IL13, NF-kB, VEGF, HIF-1 signaling, CD28 co-stimulation",
+    Cluster == "SLED23.6" ~ "Antigen presentation, Th17 cell differentiation, IL7, GPCR, NRAGE, VEGFA-VEGFR2, Ras, TNFb, DAG and IP3 signaling",
+    Cluster == "SLED23.7" ~ "Transmembrane transport",
+    Cluster == "SLED23.8" ~ "RNA metabolism",
+    Cluster == "SLED23.9" ~ "T cells, DCs, immuneregulatory interations between cells",
+    
+    Cluster == "SLED24.1" ~ "Apoptotic signaling, isotype switch, IL2 and BCR signaling, response to DNA damage",
+    Cluster == "SLED24.2" ~ "T cells, T cell activation and exhaustion, IL2 signaling",
+    Cluster == "SLED24.3" ~ "Transcription, translation, protein modification, response to DNA damage",
+    Cluster == "SLED24.4" ~ "IL18 signaling, factors involved in megakaryocyte development and platelet production, SUMOylation, senescence, transcription, translation",
+    Cluster == "SLED24.5" ~ "Transcription, translation, protein modification, TNF and RET signaling",
+    Cluster == "SLED24.6" ~ "rRNA modification and activity",
+    Cluster == "SLED24.7" ~ "Mitochondrion organization, protein K63-linked ubiquitination, site of DNA damage",
+    Cluster == "SLED24.8" ~ "Mitosis, meiosis",
+    Cluster == "SLED24.9" ~ "Histone H3-K36 demethylation",
+    Cluster == "SLED24.10" ~ "RNA polymerase I and III activity",
+    
+    Cluster == "SLED25.1" ~ "Protein synthesis, modification and export, oxidative stress",
+    Cluster == "SLED25.2" ~ "Transcription, translation, mitochondrion",
+    Cluster == "SLED25.3" ~ "Protein modification and destablization, cell cycle regulation",
+    Cluster == "SLED25.4" ~ "Protein synthesis and modification, transcription, apoptotic signaling, T cell differentiation",
+    Cluster == "SLED25.5" ~ "Protein synthesis and modification, transcription, phopholipid biosynthesis, cell cycle",
+    Cluster == "SLED25.6" ~ "Citrate metabolic process, negative regulation of helicase activity, TLR3 cascade",
+    Cluster == "SLED25.7" ~ "DNA damage response, plasma lipoprotein clearance",
+    Cluster == "SLED25.8" ~ "Chromosome organization, ER to Golgi transport vesicle membrane, SREBP signaling",
+    Cluster == "SLED25.9" ~ "mRNA modification, protein modification and localization, transport vesicle, MyD88-independent TRL4 cascade",
+    Cluster == "SLED25.10" ~ "Regulation of ER stress-induced intrinsic apoptotic signaling, mitotic sister chromatid cohesion",
+    
+    Cluster == "SLED26.1" ~ "Transcription, translation, T cells, MEP, IFN-II and -III, macroautophagy, mitophagy",
+    Cluster == "SLED26.2" ~ "Nucleotide biosynthesis and metabolism, protein folding and localization",
+    Cluster == "SLED26.3" ~ "Mitochondrial cluster, transcription, translation, TCA cycle, macromolecular metabolism",
+    Cluster == "SLED26.4" ~ "Mitochondrial translation and mRNA processing",
+    Cluster == "SLED26.5" ~ "Macromolecular biosynthesis and metabolism,  mitochondrial dysfunction-associated senescence",
+    Cluster == "SLED26.6" ~ "Transcription, translation, protein modification, cell cycle",
+    Cluster == "SLED26.7" ~ "Transcription, translation, cell cycle, macromolecular biosynthesis and metabolism",
+    Cluster == "SLED26.8" ~ "Mitochondrial stress/proteasome, transcription, protein synthesis, refolding and export, IL17 signaling ",
+    
+    Cluster == "SLED27.1" ~ "SUMOylation, nuclear pore complex, RNA transmembrane transporter activity",
+    Cluster == "SLED27.2" ~ "Protein phosphorylation and ubiquitination, macromolecular metabolism, mRNA processing",
+    Cluster == "SLED27.3" ~ "Transcription, protein modification, lymphocytes",
+    Cluster == "SLED27.4" ~ "Mitosis, protein synthesis and modification, T cells, RNA degradation, cell cycle",
+    Cluster == "SLED27.5" ~ "CD4 memory T cells, cell cycle, IFN-II, transcription, translation, protein modification and localization",
+    Cluster == "SLED27.6" ~ "Translation, downregulation of TGFb receptor and ERBB2 signaling, RIPK1-mediated regulated necrosis, glycogen metabolism",
+    Cluster == "SLED27.7" ~ "Protein synthesis and modification, DNA mismatch repair",
+    Cluster == "SLED27.8" ~ "Transcription, CD4 T cell surface signature Th2-stimulated, cell cycle, NK cell differentiation, negative regulation of TCR signaling, Tregs",
+    Cluster == "SLED27.9" ~ "Fatty acid catabolic process, sugar metabolism, B cells",
+    Cluster == "SLED27.10" ~ "Inflammasomes, B cell homeostasis, T cell differentiation in Thymus",
+    Cluster == "SLED27.11" ~ "T cells, transcription, RNA trafficking, response to TNF",
+    Cluster == "SLED27.12" ~ "S1P receptor signal transduction, pyrimidine metabolism ",
+    
+    Cluster == "SLED28.1" ~ "Oxidative phosphorylation",
+    Cluster == "SLED28.2" ~ "TCA cycle, MEP, translation initiation, transmembrane transporter activity",
+    Cluster == "SLED28.3" ~ "Glycolysis and gluconeogenesis, positive regulation of immunoglobulin production, amino acid and pyruvate metabolism, IL12 signaling, plasma cell surface signature",
+    Cluster == "SLED28.4" ~ "DNA replication, regulation of B cell proliferation",
+    Cluster == "SLED28.5" ~ "Proteasome, response to oxidative stress, protein modification, cell cycle, IL1 signaling",
+    Cluster == "SLED28.6" ~ "Unfolded protein response",
+    Cluster == "SLED28.7" ~ "Positive regulation of organelle organization, protein import into mitochondrial intermembrane space",
+    
+    Cluster == "SLED29.1" ~ "Translation initiation",
+    Cluster == "SLED29.2" ~ "Protein synthesis, glutathione metabolic process",
+    Cluster == "SLED29.3" ~ "CD4 memory T cells, protein synthesis, stress response, VEGFA-VEGFR2 and mTOR signaling",
+    Cluster == "SLED29.4" ~ "Protein synthesis and metabolism",
+    Cluster == "SLED29.5" ~ "Protein synthesis, ribosomal complex",
+    
+    Cluster == "SLED30.1" ~ "Transcription",
+    Cluster == "SLED30.2" ~ "Transcription, mRNA modification and dstabilization",
+    Cluster == "SLED30.3" ~ "Intracellular receptor signaling, intracellular transport, nuclear receptor transcription pathway",
+    Cluster == "SLED30.4" ~ "Gene silencing by miRNA, nucleosome organization",
+    Cluster == "SLED30.5" ~ "Wnt signaling, transcription initiation",
+    Cluster == "SLED30.6" ~ "Chromosome organization, protein modification",
+    Cluster == "SLED30.7" ~ "mRNA destablization, proteolysis, apoptosis, IL5 signaling",
+    Cluster == "SLED30.8" ~ "Metabolism, phosphorylation, protein export from nucleus, cellular senescence",
+    
+    Cluster == "SLED31.1" ~ "Cell proliferation and differentiation, STING mediated induction of immune responses, TNF, NTRK3 signaling",
+    Cluster == "SLED31.2" ~ "CD8 gmma-delta intraepithelial T cell differentiation, antigen presentation, thymic T cell selection, TGFb and Hippo signaling",
+    Cluster == "SLED31.3" ~ "Calcium ion and carbohydrate transport, apoptotic mitochondrial changes, rRNA pseudouridine and valine biosynthesis",
+    Cluster == "SLED31.4" ~ "cDC, epithelial cell differentiation, regulation of TGFb receptor and TNFR1 signaling",
+    Cluster == "SLED31.5" ~ "Unfolded protein response, oxidative stress-induced intrinsic apoptotic signaling",
+    
+    Cluster == "SLED32.1" ~ "Cell growth, response to hormone, SUMOylation",
+    
+    TRUE ~ "Other"  
+  ))
+
+
+DRGs.info<-SLED.clusters
+rm(SLED.clusters)
+gc()
+
+DRGs.info<-DRGs.info[order(DRGs.info$Round1,DRGs.info$Round2,decreasing = F),]
+
+save.image("C:/Users/danie/Desktop/WORK/DISEASOME/RData/SLEDiseasome.RData")
+
+
+write.table(DRGs.info,"C:/Users/danie/Desktop/WORK/DISEASOME/Results/SupplementaryTable1.txt",
+            quote = F,row.names = F, sep="\t")
+
+
+
+
