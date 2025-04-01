@@ -1,0 +1,11 @@
+The SLE diseasome database was stored as an .rdata object, available for download at link. It contained four elements, including DRGs.db, DRGs.info, Geneset.db and Geneset.info. 
+DRGs.db is a list that records the gene members associated with each of 5,212 DRGs in the database, where each entry represents a DRG named with a unique identifier (GenesetID). 
+DRGs.info is a table that provides annotations of each DRG. It contains 7 columns: the “GenesetID” column, the “Term” column that records the original annotation terms from source databases, 
+the “Round1” and “Round2” columns that indicate the numerical cluster label generated in two rounds of DRG clustering in the last step of the pipeline, the “Cluster” column that combines 
+the cluster labels in “Round1” and “Round2”, and the “Term.round1” and “Term.round2” columns that provide the detailed functional annotation corresponding to the two rounds of DRG clustering. 
+
+The intermediate results from gene set processing prior to the identification of DRGs were also provided. Geneset.db is a list with similar structure as DRGs.db and contains all 36,853 gene sets 
+identified after redundancy filtering steps. Geneset.info is a supplementary table that contains detailed information about all split gene sets generated in the first step of the pipeline, 
+prior to the filtering steps using set packing and Jaccard similarity. It includes several key columns: 1) “GenesetID” provides a unique identifier assigned to each gene set prior to the 
+application of the dissectDB function, 2) “AnnotationID” represents the original name of the pathway according to the source database, 3) “Source” specifies the source of the pathway, 
+4) “Term” contains the functional annotation associated with each AnnotationID, and 5) “Coannotation” records the GenesetIDs of the terms associated to each selected GenesetID from the filtering steps. 
