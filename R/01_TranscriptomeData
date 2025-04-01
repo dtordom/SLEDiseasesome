@@ -1,0 +1,682 @@
+#' ·············································································
+#' Building Diseasome 
+#' R version 4.4.0 (2024-04-24 ucrt)
+#' Dec 2024
+#' ·············································································
+#' Get Gene-expression datasets (SLE and NHV samples)
+
+## ·············································································
+## Set environment ---- 
+
+
+setwd("C:/Users/danie/Desktop/WORK/DISEASOME")
+set.seed(12345)
+
+source("C:/Users/danie/Desktop/WORK/DISEASOME/Code/utils.R")
+
+#library("GEOmetadb")
+pkgs<-c("parallel","matrixStats","biomaRt","NOISeq","stringr","dplyr","tidyr",
+        "doParallel","caret","pbapply","BiocParallel","tibble","GEOquery",
+        "data.table","ggplot2")
+check.packages(pkgs); rm(pkgs)
+
+## List to store the datasets
+DATA<-list()
+
+## Save ensembl to annotate genes
+options(timeout = 1e5)
+
+ensembl = useEnsembl(biomart='ensembl', dataset="hsapiens_gene_ensembl",
+                     mirror = "useast") # useast, www,asia
+#saveRDS(ensembl,"C:/Users/danie/Desktop/WORK/DISEASOME/RData/Ensembl.rds")
+
+## ·············································································
+## SLE Datasets ---- 
+
+
+#### PRECISESADS ---------------------------------------------------------------
+#' 2 sets of patients and 1 of healthy controls, without batch effect)
+#' Available by request to the authors: https://pubmed.ncbi.nlm.nih.gov/33497037/
+
+Count.precisesads<-read.table("C:/Users/danie/Desktop/WORK/DISEASOME/Data/Count.PRECISESADS.csv",
+                              header=T,sep=";",row.names=1,dec=",",stringsAsFactors = F)
+Count.precisesads<-type.convert(x = Count.precisesads,as.is=F)
+
+## Filter non-expressed genes
+Count.precisesads<-Count.precisesads[rownames(Count.precisesads)[rowCounts(Count.precisesads>=10)>=10],]
+
+## Annotate to Gene symbol
+Count.precisesads<-annotateGenes(data=Count.precisesads,
+                                 toGenes='external_gene_name',
+                                 fromGenes='ensembl_gene_id',
+                                 method = "median",ensembl = ensembl)
+
+## Tmm and Log2 normalization and filtering non variable gene
+data<-tmm(Count.precisesads)
+data<-log2(data+1)
+colnames(data)<-gsub(pattern = "X",replacement = "",x = colnames(data))
+
+precisesads1<-data
+rm(Count.precisesads,data)
+
+Count.precisesads2<-read.table("C:/Users/danie/Desktop/WORK/DISEASOME/Data/Count.PRECISESADS2.csv",
+                               header=T,sep=";",row.names=1,dec=",",stringsAsFactors = F)
+Count.precisesads2<-type.convert(x = Count.precisesads2,as.is=F)
+
+## Filter non-expressed genes
+Count.precisesads2<-Count.precisesads2[rownames(Count.precisesads2)[rowCounts(Count.precisesads2>=10)>=10],]
+
+## Annotate to Gene symbol
+Count.precisesads2<-annotateGenes(data=Count.precisesads2,
+                                  toGenes='external_gene_name',
+                                  fromGenes='ensembl_gene_id',
+                                  method = "median",ensembl = ensembl)
+
+## Tmm and Log2 normalization and filtering non variable gene
+data<-tmm(Count.precisesads2)
+data<-log2(data+1)
+colnames(data)<-gsub(pattern = "X",replacement = "",x = colnames(data))
+
+precisesads2<-data
+rm(Count.precisesads2,data)
+
+
+## Select SLE and Healthy samples 
+clin1<-read.csv(file="C:/Users/danie/Desktop/WORK/DISEASOME/Data/Metadata.PRECISESADS.csv",
+                header=T,sep=";",row.names=1,dec=",")
+clin1<-clin1[colnames(precisesads1),c(2,8)]
+
+SLE<-precisesads1[,rownames(clin1[ifelse(clin1$Diagnosis=="SLE",T,F),])]
+HC.prec<-precisesads1[,rownames(clin1[ifelse(clin1$Diagnosis=="CTRL",T,F),])]  
+
+## Remove non-variable genes in HC or SLE independently
+##NHV
+nonVar.genes<-summ.var(data = HC.prec,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+HC.prec<-HC.prec[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## SLE
+nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+
+clin2<-read.csv(file= "C:/Users/danie/Desktop/WORK/DISEASOME/Data/Metadata.PRECISESADS2.csv",
+                header=T,sep=";",row.names=1,dec=",")
+clin2<-clin2[colnames(precisesads2),c(1,5)]
+
+SLE2<-precisesads2[,rownames(clin2[ifelse(clin2$Diagnosis=="SLE",T,F),])]
+
+
+## Remove non-variable genes in HC or SLE independently
+nonVar.genes<-summ.var(data = SLE2,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE2<-SLE2[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## Select common genes
+genes<-list(rownames(HC.prec),rownames(SLE),rownames(SLE2))
+genes<-Reduce(intersect,genes)
+
+SLE.prec<-cbind(SLE[genes,],SLE2[genes,])
+HC.prec<-HC.prec[genes,]
+
+DATA[["precisesads"]]<-list("Disease"=SLE.prec,"Healthy"=HC.prec)
+
+rm(clin1,clin2,SLE,genes,SLE2,precisesads1,precisesads2,HC.prec,SLE.prec,nonVar.genes)
+
+
+
+#### Pascual et. al (GSE65391) -------------------------------------------------
+## gene expression for GSE65391 can be also downloaded from GEO using getGEO function
+
+data<-read.table(file="C:/Users/danie/Desktop/WORK/DISEASOME/Data/GSE65391_expressionData.txt"
+                 ,sep="\t",header=T,row.names = 1)
+clin<-data.frame(t(read.csv(file="C:/Users/danie/Desktop/WORK/DISEASOME/Data/Pascual_allClin.csv",
+                            sep="\t",row.names = "Sample_ID")))
+data<-data[,rownames(clin)];
+
+## Preprocessing (Log normalization and filtering non variable genes)
+data<-norm.log(data)
+
+## Separate Healthy and SLE samples
+clin$state<-ifelse(grepl("BAY", clin$Patient),"Healthy","SLE")
+HC<-data[,clin$state=="Healthy"]
+SLE<-data[,clin$state=="SLE"]
+
+## Remove non-variable genes in HC or SLE independently
+##NHV
+nonVar.genes<-summ.var(data = HC,freqCut = 70/30,
+                       uniqueCut = 10, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+HC<-HC[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## SLE
+nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                       uniqueCut = 10, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+
+genes<-intersect(rownames(HC),rownames(SLE))
+HC<-HC[genes,]
+SLE<-SLE[genes,]
+
+DATA[["pascual"]]<-list("Disease"=SLE,"Healthy"=HC)
+
+rm(clin,data,HC,SLE,nonVar.genes,genes)
+
+
+
+#### Jonhs Hopkins cohort ------------------------------------------------------
+## All clinical data can be requested to the original authors (GSE45291)
+
+data<-read.csv(file="C:/Users/danie/Desktop/WORK/DISEASOME/Data/PetriALL.txt",
+               sep="\t",row.names = "GeneSymbol")
+
+## Preprocessing (Log normalization and filtering non variable genes)
+data<-norm.log(data)
+colnames(data)<-gsub(pattern = "X",replacement = "",x = colnames(data))
+
+## Separate Healthy and SLE samples
+clin<-read.csv(file="C:/Users/danie/Desktop/WORK/DISEASOME/Data/Metadata.petri.csv",
+               sep=";",row.names = "GZ_Filenames")
+
+HC<-data[,rownames(clin)[clin$Diagnosis=="Healthy"]]
+SLE<-data[,rownames(clin)[clin$Diagnosis=="SLE"]]
+
+## Remove non-variable genes in HC or SLE independently
+nonVar.genes<-summ.var(data = HC,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+HC<-HC[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## SLE
+nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+
+genes<-intersect(rownames(HC),rownames(SLE))
+HC<-HC[genes,]
+SLE<-SLE[genes,]
+
+DATA[["petri"]]<-list("Disease"=SLE,"Healthy"=HC)
+
+rm(clin,data,HC,SLE,nonVar.genes,genes)
+
+
+
+#### DATASETS from ADEX --------------------------------------------------------
+## https://adex.genyo.es/
+
+clin<-read.csv(file="C:/Users/danie/Desktop/WORK/DISEASOME/Data/metadata.tsv",
+               sep="\t")
+rownames(clin)<-clin$Sample
+
+# "GSE45291_SLE.tsv"
+datasets<-c("GSE24706.tsv","GSE50772.tsv","GSE61635.tsv",
+            "GSE72509.tsv","GSE82221_GPL10558.tsv","GSE108497.tsv",
+            "GSE110169_SLE.tsv","GSE110174.tsv")
+
+
+for(d in 1:length(datasets)){
+  dat<-datasets[d]
+  datName<-gsub(".tsv","",dat)
+  
+  data<-read.csv(file=paste0("C:/Users/danie/Desktop/WORK/DISEASOME/Data/",dat),
+                 sep="\t",row.names = "gene")
+  
+  ## Preprocessing (Log normalization and filtering non variable genes)
+  data<-norm.log(data)
+  
+  ## Separate Healthy and SLE samples
+  tmp<-clin[colnames(data),c("GSE","Condition")]
+  HC<-data[,rownames(tmp)[tmp$Condition=="Healthy"]]
+  SLE<-data[,rownames(tmp)[tmp$Condition=="SLE"]]
+  
+  ## Remove non-variable genes in HC or SLE independently
+  nonVar.genes<-summ.var(data = HC,freqCut = 70/30,
+                         uniqueCut = 30, 
+                         minVar = 0.05)
+  table(nonVar.genes$nzv)
+  table(nonVar.genes$thrSD)
+  plot(density(nonVar.genes$sd))
+  print(min(nonVar.genes$sd))
+  HC<-HC[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+  
+  ## SLE
+  nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                         uniqueCut = 30, 
+                         minVar = 0.05)
+  table(nonVar.genes$nzv)
+  table(nonVar.genes$thrSD)
+  plot(density(nonVar.genes$sd))
+  print(min(nonVar.genes$sd))
+  SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+  
+
+  genes<-intersect(rownames(HC),rownames(SLE))
+  HC<-HC[genes,]
+  SLE<-SLE[genes,]
+  
+  DATA[[datName]]<-list("Disease"=SLE,"Healthy"=HC)
+}
+
+rm(data,HC,SLE,tmp,nonVar.genes,clin,d,dat,datasets,datName,genes)
+
+for(i in 1:length(DATA)){
+  print(paste0("SLE: ",ncol(DATA[[i]]$Disease)," - NHV: ",ncol(DATA[[i]]$Healthy)))
+}
+
+# saveRDS(DATA,"C:/Users/danie/Desktop/WORK/Update_MyPROSLE/RData/Datasets.rds")
+
+
+
+#### Query NCBI GEO ------------------------------------------------------------
+
+# DATA<-readRDS("C:/Users/danie/Desktop/WORK/Update_MyPROSLE/RData/Datasets.rds")
+
+#' load("C:/Users/danie/Desktop/WORK/DISEASOME/Data/sleGEO.RData")
+#' 
+#' #' Filtering by number of healthy and sle samples: 15 SLE / 10 HEALTHY
+#' 
+#' sel<-table(sleGEO$gse)[table(sleGEO$gse)>=25]
+#' sleGEO<-sleGEO[sleGEO$gse %in% names(sel),]
+#' 
+#' ## Filtering repeated Datasets
+#' sel<-names(sel)
+#' sel<-sel[!sel %in% c("GSE88884","GSE110169","GSE110174","GSE24706")]
+#' rm(sel,sleGEO,i)
+
+#' Manual curation 
+#' selected:
+#' GSE154851 (no), GSE211700 (yes), GSE22098
+
+
+##  GSE211700
+data <- as.data.frame(fread("C:/Users/danie/Desktop/WORK/DISEASOME/Data/GSE211700_Transcript_FPKM.txt"))
+
+genome<-data[,c("Transcript_id","Official_Symbol")]
+rownames(data)<-data$Transcript_id
+data<-data[,-c(1:4)]
+
+data<-norm.log(data+1)
+
+genome$Official_Symbol<-gsub("\\..*","",genome$Official_Symbol)
+genome[genome=="--"]<-NA
+
+genome <- genome %>% `colnames<-`(c("fromGenes","toGenes")) %>% 
+  replace(.=="",NA) %>% drop_na() %>% filter(fromGenes %in% as.character(rownames(data)))
+
+data = data[genome$fromGenes,]
+finalGenes = unique(genome$toGenes)
+
+temp = as.data.frame(do.call("rbind", mclapply(finalGenes, mergeExpression,
+                                               genome = genome,
+                                               expressionMatrix = data,
+                                               method = "median",
+                                               mc.cores = ifelse(as.character(Sys.info()["sysname"])=="Windows",1,detectCores()))))
+rownames(temp) = finalGenes
+colnames(temp) = colnames(data)
+data<-temp
+
+SLE<-data[,-c(grep("CTRL",colnames(data)))]
+HC<-data[,grep("CTRL",colnames(data))]
+
+## Remove non-variable genes in HC or SLE independently
+nonVar.genes<-summ.var(data = HC,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+HC<-HC[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## SLE
+nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+
+genes<-intersect(rownames(HC),rownames(SLE))
+HC<-HC[genes,]
+SLE<-SLE[genes,]
+
+DATA[["GSE211700"]]<-list("Disease"=SLE,"Healthy"=HC)
+rm(temp,finalGenes,genome,nonVar.genes,SLE,HC,data)
+
+
+## GSE22098
+gset = getGEO("GSE22098", GSEMatrix =TRUE,
+              destdir="C:/Users/danie/Desktop/WORK/DISEASOME/RData")
+clin<-phenoData(gset[[1]])
+clin<-pData(clin)
+clin<-clin[,c("title","geo_accession","healthy control:ch1","illness:ch1")]
+gset<-gset[[1]]
+data<-exprs(gset)
+
+data<-norm.log(data + abs(min(data))+1)
+
+genome<-read.csv("C:/Users/danie/Desktop/WORK/DISEASOME/Data/GPL6947-13512.txt",
+                 sep="\t",skip=30)[,c("ID","Symbol")]
+
+genome <- genome %>% `colnames<-`(c("fromGenes","toGenes")) %>% 
+  replace(.=="",NA) %>% drop_na() %>% filter(fromGenes %in% as.character(rownames(data)))
+
+data = data[genome$fromGenes,]
+finalGenes = unique(genome$toGenes)
+
+temp = as.data.frame(do.call("rbind", mclapply(finalGenes, mergeExpression,
+                                               genome = genome,
+                                               expressionMatrix = data,
+                                               method = "median",
+                                               mc.cores = ifelse(as.character(Sys.info()["sysname"])=="Windows",1,detectCores()))))
+rownames(temp) = finalGenes
+colnames(temp) = colnames(data)
+data<-temp
+
+
+colnames(clin)<-c("title","gsm","healthy","disease")
+
+## Pediatric set
+hc<- clin %>% filter(healthy == "pSLE")
+HC<-data[,hc$gsm]
+sle<- clin %>% filter(disease == "PSLE")
+SLE<-data[,sle$gsm]
+
+## Remove non-variable genes in HC or SLE independently
+nonVar.genes<-summ.var(data = HC,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+HC<-HC[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## SLE
+nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+
+genes<-intersect(rownames(HC),rownames(SLE))
+HC<-HC[genes,]
+SLE<-SLE[genes,]
+
+DATA[["GSE22098p"]]<-list("Disease"=SLE,"Healthy"=HC)
+
+## Adult set
+hc<- clin %>% filter(healthy == "ASLE")
+HC<-data[,hc$gsm]
+sle<- clin %>% filter(disease == "ASLE")
+SLE<-data[,sle$gsm]
+
+## Remove non-variable genes in HC or SLE independently
+nonVar.genes<-summ.var(data = HC,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+HC<-HC[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## SLE
+nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+genes<-intersect(rownames(HC),rownames(SLE))
+HC<-HC[genes,]
+SLE<-SLE[genes,]
+
+DATA[["GSE22098a"]]<-list("Disease"=SLE,"Healthy"=HC)
+
+rm(data,clin,genome,gset,hc,HC,SLE,sle,temp,finalGenes,nonVar.genes,genes)
+
+
+
+#### GSE88887 - Tabalumab (large dataset) --------------------------------------
+
+load("C:/Users/danie/Desktop/WORK/DISEASOME/Data/Tabalumab.RData")
+
+data<-norm.log(Raw.tab)
+
+## Annotation to gene symbol
+# [HTA-2_0] Affymetrix Human Transcriptome Array 2.0 [transcript (gene) version]
+
+
+rownames(data)<-gsub("(.hg).*","\\1",rownames(data))
+
+data<-annotateGenes(data=data,
+                    toGenes='external_gene_name',
+                    fromGenes='affy_hta_2_0',
+                    method = "median",ensembl=ensembl)
+
+HC<-data[,rownames(clin.tab[clin.tab$State=="Normal",])]
+SLE<-data[,rownames(clin.tab[clin.tab$State=="SLE",])]
+
+## Remove non-variable genes in HC or SLE independently
+nonVar.genes<-summ.var(data = HC,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+HC<-HC[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+## SLE
+nonVar.genes<-summ.var(data = SLE,freqCut = 70/30,
+                       uniqueCut = 30, 
+                       minVar = 0.05)
+table(nonVar.genes$nzv)
+table(nonVar.genes$thrSD)
+plot(density(nonVar.genes$sd))
+print(min(nonVar.genes$sd))
+SLE<-SLE[!(nonVar.genes$nzv | nonVar.genes$thrSD),] 
+
+
+genes<-intersect(rownames(HC),rownames(SLE))
+HC<-HC[genes,]
+SLE<-SLE[genes,]
+
+DATA[["GSE88887"]]<-list("Disease"=SLE,"Healthy"=HC)
+rm(list=setdiff(ls(),"DATA"))
+
+saveRDS(DATA,"C:/Users/danie/Desktop/WORK/DISEASOME/RData/Datasets.rds")
+
+## ·············································································
+## Data Visualization ---- 
+
+library("ggplot2")
+library("ggpubr")
+
+DATA<-readRDS("C:/Users/danie/Desktop/WORK/DISEASOME/RData/Datasets.rds")
+
+theme_set(theme_bw() + 
+            theme(legend.position = "bottom",
+                  legend.title = element_text(size=8, face="bold"),
+                  legend.text = element_text(size=8),
+                  axis.text.x=element_text(size=8, color = "black"),
+                  axis.text.y = element_text(size=8, color = "black"),
+                  axis.title = element_text(size=10, color = "black", face = "bold"), 
+                  plot.title = element_text(hjust = 0.5, size = 8, face = "bold"),
+                  plot.subtitle = element_text(size = 8,hjust = 0.5),
+                  strip.text = element_text(size=6), 
+                  strip.background = element_blank()))
+
+
+m<- as.data.frame(matrix(data=0,nrow=length(DATA),ncol=3))
+colnames(m)<-c("study","healthy","sle")
+rownames(m)<-names(DATA)
+m$study<-names(DATA)
+
+for (i in 1:length(DATA)) {
+  m$sle[i]<-ncol(DATA[[i]]$Disease)
+  m$healthy[i]<-ncol(DATA[[i]]$Healthy)
+}
+
+## Longitudinal patients: pascual, petri, GSE88887, GSE108497
+m$patients<-m$sle
+m$patients[2]<-158
+m$patients[3]<-301
+m$patients[9]<-92
+m$patients[15]<-1760
+
+
+m$platform<-c("RNASeq","Microarray","Microarray","Microarray",
+              "Microarray","Microarray","RNASeq","Microarray","Microarray",
+              "Microarray","Microarray","RNASeq","Microarray","Microarray",
+              "Microarray")
+m$age<-c("adult","pediatric","adult","adult","adult","adult","adult",
+         "adult","adult","adult","adult","adult","pediatric","adult","adult")
+
+m$tissue<-c("WB","PBMC","WB","WB","PBMC","WB","WB",
+            "PBMC","WB","WB","WB","PBMC","WB","WB","WB")
+
+
+## SLE vs NHV
+m.1<- data.frame("group"=c("SLE","NHV"),
+                 "value"=c(sum(m$sle),sum(m$healthy)),
+                 "text"=c(paste0(sum(m$sle)," (",sum(m$patients),")"),
+                          paste0(sum(m$healthy)," (",sum(m$healthy),")")))
+
+m.1 <- m.1 %>% 
+  mutate(prop = value / sum(value) * 100,
+         ypos = cumsum(prop) - 0.5 * prop)
+
+p1<-ggplot(m.1, aes(x = "", y = prop, fill = group)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar(theta = "y") +
+  labs(title = "Sample size") +
+  theme_void() + 
+  theme(legend.position = "bottom",legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5,size = 12,face = "bold")) +
+  scale_fill_manual(values=c("SLE"="lightskyblue3",
+                             "NHV"= "#CCCCCC")) +
+  geom_text(aes(label = text, y = ypos), color = "black", size = 3)
+
+
+## Platform
+m.2<-m
+m.2$total<-apply(m.2[,c("sle","healthy")],1,sum)
+
+m.2<- as.data.frame(m.2 %>% 
+                      group_by(platform) %>%
+                      summarise(val = sum(total)))
+
+m.2 <- m.2 %>% mutate(prop = val / sum(val) * 100,
+                      ypos = cumsum(prop) - 0.5 * prop)
+m.2$platform<-factor(m.2$platform,levels=c("RNASeq","Microarray"))
+
+p2<-ggplot(m.2, aes(x = "", y = prop, fill = platform)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar(theta = "y") +
+  labs(title = "Platform") +
+  theme_void() + 
+  theme(legend.position = "bottom",legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5,size = 12,face = "bold")) +
+  scale_fill_manual(values=c("RNASeq"="#CCCCCC",
+                             "Microarray"= "lightskyblue3")) +
+  geom_text(aes(label = val, y = ypos), color = "black", size = 3)
+
+
+## Age
+m.2<-m
+m.2$total<-apply(m.2[,c("sle","healthy")],1,sum)
+
+m.2<- as.data.frame(m.2 %>% 
+                      group_by(age) %>%
+                      summarise(val = sum(total)))
+
+m.2 <- m.2 %>% mutate(prop = val / sum(val) * 100,
+                      ypos = cumsum(prop) - 0.5 * prop)
+m.2$age<-factor(m.2$age,levels=c("pediatric","adult"))
+
+p3<-ggplot(m.2, aes(x = "", y = prop, fill = age)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar(theta = "y") +
+  labs(title = "Age") +
+  theme_void() + 
+  theme(legend.position = "bottom",legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5,size = 12,face = "bold")) +
+  scale_fill_manual(values=c("pediatric"="#CCCCCC",
+                             "adult"= "lightskyblue3")) +
+  geom_text(aes(label = val, y = ypos), color = "black", size = 3)
+
+
+## tissue
+m.2<-m
+m.2$total<-apply(m.2[,c("sle","healthy")],1,sum)
+
+m.2<- as.data.frame(m.2 %>% 
+                      group_by(tissue) %>%
+                      summarise(val = sum(total)))
+
+m.2 <- m.2 %>% mutate(prop = val / sum(val) * 100,
+                      ypos = cumsum(prop) - 0.5 * prop)
+m.2$tissue<-factor(m.2$tissue,levels=c("WB","PBMC"))
+
+p4<-ggplot(m.2, aes(x = "", y = prop, fill = tissue)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar(theta = "y") +
+  labs(title = "Tissue") +
+  theme_void() + 
+  theme(legend.position = "bottom",legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5,size = 12,face = "bold")) +
+  scale_fill_manual(values=c("WB"="lightskyblue3",
+                             "PBMC"= "#CCCCCC")) +
+  geom_text(aes(label = val, y = ypos), color = "black", size = 3)
+
+
+ggarrange(p1,p2,p3,p4,ncol=4,nrow = 1)
