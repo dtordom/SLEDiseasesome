@@ -1,2 +1,2 @@
-# SLEDiseasome
-R codes for SLE-diseasome database construction
+# SLEDiseaseome
+R codes for SLE-diseaseome database construction
